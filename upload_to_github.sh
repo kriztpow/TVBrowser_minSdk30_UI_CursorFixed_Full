@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-echo "🚀 Subiendo proyecto a GitHub"
+echo "🚀 Subiendo proyecto a GitHube"
 if ! command -v git &> /dev/null; then
   pkg update -y && pkg install git -y
 fi
