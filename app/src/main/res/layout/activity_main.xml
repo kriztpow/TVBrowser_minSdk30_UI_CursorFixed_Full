@@ -1,67 +1,63 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:id="@+id/rootLayout"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/topAppBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#1A1A1A"
+        app:title="Screen Share Pro"
+        app:titleTextColor="#FFFFFF"
+        app:layout_constraintTop_toTopOf="parent" />
 
     <LinearLayout
-        android:id="@+id/topBar"
-        android:layout_width="0dp"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:padding="8dp"
-        android:background="#222222"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="20dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/topAppBar">
 
-        <EditText
-            android:id="@+id/urlBar"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_weight="1"
-            android:singleLine="true"
-            android:imeOptions="actionGo"
-            android:inputType="textUri"
-            android:textColor="@android:color/white"
-            android:textColorHint="@android:color/darker_gray"
-            android:hint="Escribe una URL o busca"
-            android:background="@android:color/transparent"
-            android:paddingLeft="8dp"
-            android:paddingRight="8dp" />
-
-        <Button
-            android:id="@+id/goButton"
+        <TextView
+            android:id="@+id/statusText"
             android:layout_width="wrap_content"
-            android:layout_height="40dp"
-            android:text="Ir" />
+            android:layout_height="wrap_content"
+            android:text="Listo para transmitir"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:layout_marginBottom="10dp"/>
 
-        <Button
-            android:id="@+id/toggleOrientation"
+        <TextView
+            android:id="@+id/ipText"
             android:layout_width="wrap_content"
-            android:layout_height="40dp"
-            android:text="Vertical↔Horizontal"
-            android:layout_marginLeft="8dp" />
+            android:layout_height="wrap_content"
+            android:text="IP: --.--.--.--"
+            android:textColor="#03DAC6"
+            android:textSize="18sp"
+            android:layout_marginBottom="30dp"/>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/shareButton"
+            android:layout_width="200dp"
+            android:layout_height="64dp"
+            android:text="INICIAR TRANSMISIÓN"
+            app:icon="@android:drawable/ic_menu_share"
+            app:cornerRadius="32dp"
+            app:backgroundTint="#6200EE" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/panicButton"
+            android:layout_width="200dp"
+            android:layout_height="64dp"
+            android:layout_marginTop="20dp"
+            android:text="CERRAR TODO"
+            app:cornerRadius="32dp"
+            app:backgroundTint="#FF0000" />
     </LinearLayout>
 
-    <WebView
-        android:id="@+id/webview"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        app:layout_constraintTop_toBottomOf="@+id/topBar"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
-
-    <!-- Cursor overlay -->
-    <View
-        android:id="@+id/cursorView"
-        android:layout_width="28dp"
-        android:layout_height="28dp"
-        android:background="@android:color/white"
-        android:alpha="0.9"
-        android:elevation="16dp"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"/>
 </androidx.constraintlayout.widget.ConstraintLayout>
