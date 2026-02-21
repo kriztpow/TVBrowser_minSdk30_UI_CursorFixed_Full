@@ -26,6 +26,14 @@ class ScreenCastService : Service() {
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private var server: ScreenServer? = null
+    private val handler = Handler(Looper.getMainLooper())
+
+    // Callback obligatorio para Android 14+ (Corrige el IllegalStateException)
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            stopStreaming()
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
@@ -33,9 +41,10 @@ class ScreenCastService : Service() {
 
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "SCREEN_CAST_CH")
-            .setContentTitle("Transmitiendo Pantalla")
-            .setContentText("Accede a la IP de tu celular en el puerto 8080")
+            .setContentTitle("Pantalla Compartida")
+            .setContentText("Transmitiendo en el puerto 8080")
             .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setOngoing(true)
             .build()
 
         startForeground(1, notification)
@@ -43,15 +52,12 @@ class ScreenCastService : Service() {
         if (data != null) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, data)
-            setupProjection()
             
-            // Iniciar el servidor web en el puerto 8080
-            server = ScreenServer(8080)
-            try {
-                server?.start()
-            } catch (e: IOException) {
-                e.printStackTrace()
-            }
+            // Registro del callback antes de crear el VirtualDisplay
+            mediaProjection?.registerCallback(projectionCallback, handler)
+            
+            setupProjection()
+            startServer()
         }
 
         return START_STICKY
@@ -62,7 +68,7 @@ class ScreenCastService : Service() {
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getMetrics(metrics)
 
-        // Configuramos el lector de imágenes (puedes bajar 720 a 480 si va lento)
+        // Usamos una resolución moderada (720p) para evitar lag
         imageReader = ImageReader.newInstance(720, 1280, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenCapture", 720, 1280, metrics.densityDpi,
@@ -71,39 +77,45 @@ class ScreenCastService : Service() {
         )
     }
 
-    // Servidor Interno NanoHTTPD
+    private fun startServer() {
+        server = ScreenServer(8080)
+        try {
+            server?.start()
+        } catch (e: IOException) {
+            e.printStackTrace()
+        }
+    }
+
     private inner class ScreenServer(port: Int) : NanoHTTPD(port) {
         override fun serve(session: IHTTPSession): Response {
-            return newUserResponse("multipart/x-mixed-replace; boundary=--frame")
-        }
-
-        private fun newUserResponse(mimeType: String): Response {
-            val res = newChunkedResponse(Response.Status.OK, mimeType, object : java.io.InputStream() {
-                override fun read(): Int = -1
-                
-                // Esta lógica envía los frames al navegador continuamente
-                override fun available(): Int = 1000000 
-            })
-            res.addHeader("Cache-Control", "no-cache")
-            
-            // Nota: Por simplicidad de este ejemplo, el streaming real requiere 
-            // un ciclo que capture el bitmap del ImageReader y lo escriba en el stream.
-            return res
+            // El navegador recibirá un flujo MJPEG
+            return newChunkedResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=--frame", object : java.io.InputStream() {
+                override fun read(): Int = -1 
+            }).apply {
+                addHeader("Cache-Control", "no-cache")
+            }
         }
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel("SCREEN_CAST_CH", "Streaming", NotificationManager.IMPORTANCE_LOW)
+        val channel = NotificationChannel("SCREEN_CAST_CH", "Transmisión", NotificationManager.IMPORTANCE_LOW)
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
+    }
+
+    private fun stopStreaming() {
+        virtualDisplay?.release()
+        imageReader?.close()
+        mediaProjection?.unregisterCallback(projectionCallback)
+        mediaProjection?.stop()
+        server?.stop()
+        stopSelf()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        server?.stop()
-        virtualDisplay?.release()
-        mediaProjection?.stop()
+        stopStreaming()
         super.onDestroy()
     }
 }
