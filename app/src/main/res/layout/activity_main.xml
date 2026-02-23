@@ -1,15 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.constraintlayout.widget.ConstraintLayout 
+    xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/mainLayout" 
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="#1A1A1A">
 
     <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/topAppBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="#1A1A1A"
+        android:background="#333333"
         app:title="Screen Share Pro"
         app:titleTextColor="#FFFFFF"
         app:layout_constraintTop_toTopOf="parent" />
@@ -24,40 +26,31 @@
         app:layout_constraintTop_toBottomOf="@id/topAppBar">
 
         <TextView
-            android:id="@+id/statusText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Listo para transmitir"
-            android:textColor="#FFFFFF"
-            android:textSize="20sp"
-            android:layout_marginBottom="10dp"/>
-
-        <TextView
             android:id="@+id/ipText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="IP: --.--.--.--"
+            android:text="Cargando IP..."
             android:textColor="#03DAC6"
-            android:textSize="18sp"
+            android:textSize="20sp"
             android:layout_marginBottom="30dp"/>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/shareButton"
-            android:layout_width="200dp"
-            android:layout_height="64dp"
+            android:layout_width="220dp"
+            android:layout_height="70dp"
             android:text="INICIAR TRANSMISIÓN"
-            app:icon="@android:drawable/ic_menu_share"
-            app:cornerRadius="32dp"
+            app:cornerRadius="35dp"
             app:backgroundTint="#6200EE" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/panicButton"
-            android:layout_width="200dp"
-            android:layout_height="64dp"
+            android:layout_width="220dp"
+            android:layout_height="70dp"
             android:layout_marginTop="20dp"
-            android:text="CERRAR TODO"
-            app:cornerRadius="32dp"
-            app:backgroundTint="#FF0000" />
+            android:text="CERRAR APP"
+            app:cornerRadius="35dp"
+            app:backgroundTint="#B00020" />
+            
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
