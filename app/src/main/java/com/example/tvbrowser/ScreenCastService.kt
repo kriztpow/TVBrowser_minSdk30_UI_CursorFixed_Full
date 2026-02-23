@@ -10,9 +10,8 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.os.Handler
-import android.os.IBinder
-import android.os.Looper
+import android.net.wifi.WifiManager
+import android.os.*
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
@@ -30,6 +29,10 @@ class ScreenCastService : Service() {
     private var imageReader: ImageReader? = null
     private var server: ScreenServer? = null
     private val handler = Handler(Looper.getMainLooper())
+    
+    // Bloqueos para evitar desconexión al apagar pantalla
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() { stopStreaming() }
@@ -39,10 +42,19 @@ class ScreenCastService : Service() {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
+        // 1. Activar bloqueos de energía y Wi-Fi
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenShare::WakeLock")
+        wakeLock?.acquire(10*60*1000L /*10 minutos o lo que desees*/)
+
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ScreenShare::WifiLock")
+        wifiLock?.acquire()
+
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "SCREEN_CAST_CH")
-            .setContentTitle("Pantalla Compartida")
-            .setContentText("Transmisión activa en puerto 8080")
+            .setContentTitle("Transmisión Persistente Activa")
+            .setContentText("El servidor sigue funcionando aunque apagues la pantalla")
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setOngoing(true)
             .build()
@@ -65,7 +77,6 @@ class ScreenCastService : Service() {
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getMetrics(metrics)
 
-        // Usamos una resolución menor (480p) para garantizar que el Wi-Fi no se sature
         imageReader = ImageReader.newInstance(480, 854, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenCapture", 480, 854, metrics.densityDpi,
@@ -100,7 +111,7 @@ class ScreenCastService : Service() {
                             image.close()
 
                             val baos = ByteArrayOutputStream()
-                            bitmap.compress(Bitmap.CompressFormat.JPEG, 70, baos)
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
                             val jpegData = baos.toByteArray()
 
                             outputStream.write(("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + jpegData.size + "\r\n\r\n").toByteArray())
@@ -108,11 +119,10 @@ class ScreenCastService : Service() {
                             outputStream.write("\r\n".toByteArray())
                             outputStream.flush()
                         }
-                        Thread.sleep(100) // 10 FPS aproximadamente para no saturar
+                        Thread.sleep(150) 
                     }
                 } catch (e: Exception) { }
             }
-
             return newChunkedResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=--frame", inputStream)
         }
     }
@@ -123,6 +133,8 @@ class ScreenCastService : Service() {
     }
 
     private fun stopStreaming() {
+        if (wakeLock?.isHeld == true) wakeLock?.release()
+        if (wifiLock?.isHeld == true) wifiLock?.release()
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
