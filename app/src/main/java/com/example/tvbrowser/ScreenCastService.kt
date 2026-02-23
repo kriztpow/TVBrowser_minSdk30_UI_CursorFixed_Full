@@ -28,24 +28,17 @@ class ScreenCastService : Service() {
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private var server: ScreenServer? = null
-    private val handler = Handler(Looper.getMainLooper())
-    
-    // Bloqueos para evitar desconexión al apagar pantalla
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
-
-    private val projectionCallback = object : MediaProjection.Callback() {
-        override fun onStop() { stopStreaming() }
-    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
-        // 1. Activar bloqueos de energía y Wi-Fi
+        // BLOQUEOS DE HARDWARE
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenShare::WakeLock")
-        wakeLock?.acquire(10*60*1000L /*10 minutos o lo que desees*/)
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenShare::Lock")
+        wakeLock?.acquire()
 
         val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ScreenShare::WifiLock")
@@ -53,8 +46,8 @@ class ScreenCastService : Service() {
 
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "SCREEN_CAST_CH")
-            .setContentTitle("Transmisión Persistente Activa")
-            .setContentText("El servidor sigue funcionando aunque apagues la pantalla")
+            .setContentTitle("Screen Share Pro")
+            .setContentText("Transmitiendo pantalla (Servidor activo)")
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setOngoing(true)
             .build()
@@ -64,8 +57,6 @@ class ScreenCastService : Service() {
         if (data != null) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, data)
-            mediaProjection?.registerCallback(projectionCallback, handler)
-            
             setupProjection()
             startServer()
         }
@@ -98,7 +89,7 @@ class ScreenCastService : Service() {
             thread {
                 try {
                     while (true) {
-                        val image = imageReader?.acquireLatestImage()
+                        val image = try { imageReader?.acquireLatestImage() } catch (e: Exception) { null }
                         if (image != null) {
                             val planes = image.planes
                             val buffer = planes[0].buffer
@@ -114,12 +105,14 @@ class ScreenCastService : Service() {
                             bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
                             val jpegData = baos.toByteArray()
 
-                            outputStream.write(("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + jpegData.size + "\r\n\r\n").toByteArray())
+                            outputStream.write(("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpegData.size}\r\n\r\n").toByteArray())
                             outputStream.write(jpegData)
                             outputStream.write("\r\n".toByteArray())
                             outputStream.flush()
+                        } else {
+                            Thread.sleep(300) // Pantalla apagada: esperamos con calma
                         }
-                        Thread.sleep(150) 
+                        Thread.sleep(150)
                     }
                 } catch (e: Exception) { }
             }
@@ -132,16 +125,14 @@ class ScreenCastService : Service() {
         (getSystemService(NotificationManager::class.java)).createNotificationChannel(channel)
     }
 
-    private fun stopStreaming() {
-        if (wakeLock?.isHeld == true) wakeLock?.release()
-        if (wifiLock?.isHeld == true) wifiLock?.release()
-        virtualDisplay?.release()
-        imageReader?.close()
-        mediaProjection?.stop()
+    override fun onDestroy() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wifiLock?.let { if (it.isHeld) it.release() }
         server?.stop()
-        stopSelf()
+        virtualDisplay?.release()
+        mediaProjection?.stop()
+        super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
-    override fun onDestroy() { stopStreaming(); super.onDestroy() }
+    override fun onBind(intent: Intent?) = null
 }
