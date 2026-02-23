@@ -29,10 +29,11 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Mantiene la pantalla encendida lógicamente (aunque el brillo sea 0)
+        // IMPORTANTE para Xiaomi: Mantiene el proceso vivo
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        mainLayout = findViewById(R.id.mainLayout) // Asegúrate que tu XML tenga este ID
+        // Vincular vistas
+        mainLayout = findViewById(R.id.mainLayout)
         shareButton = findViewById(R.id.shareButton)
         panicButton = findViewById(R.id.panicButton)
         ipText = findViewById(R.id.ipText)
@@ -40,7 +41,7 @@ class MainActivity : AppCompatActivity() {
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
         val ip = getLocalIpAddress()
-        ipText.text = if (ip != null) "http://$ip:8080" else "Conecta Wi-Fi"
+        ipText.text = if (ip != null) "http://$ip:8080" else "Sin Wi-Fi"
 
         shareButton.setOnClickListener {
             if (ip != null) {
@@ -54,7 +55,7 @@ class MainActivity : AppCompatActivity() {
             exitProcess(0)
         }
 
-        // Tocar la pantalla restaura el brillo
+        // Si la pantalla está negra, un toque restaura el brillo
         mainLayout.setOnClickListener {
             if (isDimmed) toggleDimMode(false)
         }
@@ -64,13 +65,15 @@ class MainActivity : AppCompatActivity() {
         isDimmed = activate
         val params = window.attributes
         if (activate) {
-            params.screenBrightness = 0.01f 
+            params.screenBrightness = 0.01f // Brillo al mínimo
             mainLayout.setBackgroundColor(Color.BLACK)
-            ipText.text = "TRANSMITIENDO... (Toca para ver)"
+            ipText.text = "TRANSMITIENDO... (Toca para restaurar)"
+            shareButton.visibility = android.view.View.INVISIBLE
         } else {
-            params.screenBrightness = -1f 
+            params.screenBrightness = -1f // Brillo normal
             mainLayout.setBackgroundColor(Color.parseColor("#1A1A1A"))
             ipText.text = "http://${getLocalIpAddress()}:8080"
+            shareButton.visibility = android.view.View.VISIBLE
         }
         window.attributes = params
     }
@@ -84,7 +87,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onBackPressed() {
-        moveTaskToBack(true) // No cierra la app, la minimiza
+        moveTaskToBack(true) // En lugar de cerrar, minimiza
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -95,7 +98,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra("DATA", data)
             }
             startForegroundService(serviceIntent)
-            toggleDimMode(true) // Activa ahorro al iniciar
+            toggleDimMode(true) // Activa el modo ahorro automáticamente
         }
     }
 }
