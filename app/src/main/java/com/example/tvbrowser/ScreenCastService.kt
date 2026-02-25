@@ -20,8 +20,10 @@ import androidx.core.app.NotificationCompat
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.io.OutputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 
 class ScreenCastService : Service() {
 
@@ -31,18 +33,12 @@ class ScreenCastService : Service() {
     private var server: ScreenServer? = null
     private val handler = Handler(Looper.getMainLooper())
 
-    // Locks para mantener CPU y Wi-Fi activos
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
-    // Último frame capturado (en formato JPEG)
     @Volatile
     private var lastJpegData: ByteArray? = null
-
-    // Estado de la pantalla
     private val isScreenOn = AtomicBoolean(true)
-
-    // Bandera para evitar doble liberación
     private var isStopping = false
 
     private val projectionCallback = object : MediaProjection.Callback() {
@@ -51,23 +47,17 @@ class ScreenCastService : Service() {
         }
     }
 
-    // Receptor para eventos de pantalla
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                Intent.ACTION_SCREEN_OFF -> {
-                    isScreenOn.set(false)
-                }
-                Intent.ACTION_SCREEN_ON -> {
-                    isScreenOn.set(true)
-                }
+                Intent.ACTION_SCREEN_OFF -> isScreenOn.set(false)
+                Intent.ACTION_SCREEN_ON -> isScreenOn.set(true)
             }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
-        // Registrar receptor para encendido/apagado de pantalla
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
@@ -79,21 +69,18 @@ class ScreenCastService : Service() {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
-        // Adquirir WakeLock sin timeout
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenShare::WakeLock")
-        wakeLock?.acquire()
+        wakeLock?.acquire(10*60*1000L)
 
-        // Adquirir WifiLock de alto rendimiento
         val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ScreenShare::WifiLock")
         wifiLock?.acquire()
 
-        // Crear canal de notificación y poner en foreground
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "SCREEN_CAST_CH")
-            .setContentTitle("Transmisión en curso")
-            .setContentText("El servidor sigue activo aunque la pantalla esté apagada")
+            .setContentTitle("Transmisión Activa")
+            .setContentText("El servidor sigue funcionando con pantalla apagada")
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setOngoing(true)
             .build()
@@ -102,6 +89,7 @@ class ScreenCastService : Service() {
         if (data != null) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, data)
+            // Registro obligatorio para evitar Crash en Android 14+
             mediaProjection?.registerCallback(projectionCallback, handler)
             setupProjection()
             startServer()
@@ -115,21 +103,15 @@ class ScreenCastService : Service() {
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getMetrics(metrics)
 
-        // Usamos una resolución moderada para equilibrar calidad/rendimiento
-        val targetWidth = 720
-        val targetHeight = (targetWidth * metrics.heightPixels) / metrics.widthPixels
+        val targetWidth = 480
+        val targetHeight = 854
 
         imageReader = ImageReader.newInstance(targetWidth, targetHeight, PixelFormat.RGBA_8888, 2)
 
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ScreenCapture",
-            targetWidth,
-            targetHeight,
-            metrics.densityDpi,
+            "ScreenCapture", targetWidth, targetHeight, metrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader!!.surface,  // Usamos !! porque imageReader ya fue inicializado
-            null,
-            null
+            imageReader?.surface, null, null
         )
     }
 
@@ -142,104 +124,72 @@ class ScreenCastService : Service() {
         }
     }
 
-    // Servidor HTTP que sirve MJPEG
     private inner class ScreenServer(port: Int) : NanoHTTPD(port) {
-
         override fun serve(session: IHTTPSession): Response {
-            return object : Response(Response.Status.OK, "multipart/x-mixed-replace; boundary=frame", null) {
-                override fun send(out: OutputStream) {
-                    try {
-                        // Mientras la conexión esté activa, enviamos frames
-                        while (true) {
-                            // Intentar obtener una imagen nueva
-                            val image = imageReader?.acquireLatestImage()
-                            if (image != null) {
-                                // Convertir a JPEG y guardar como último frame
-                                val planes = image.planes
-                                val buffer = planes[0].buffer
-                                val pixelStride = planes[0].pixelStride
-                                val rowStride = planes[0].rowStride
-                                val width = image.width
-                                val height = image.height
-                                val rowPadding = rowStride - pixelStride * width
+            val outputStream = PipedOutputStream()
+            val inputStream = PipedInputStream(outputStream)
 
-                                val bitmap = Bitmap.createBitmap(
-                                    width + rowPadding / pixelStride,
-                                    height,
-                                    Bitmap.Config.ARGB_8888
-                                )
-                                bitmap.copyPixelsFromBuffer(buffer)
+            thread {
+                try {
+                    while (!isStopping) {
+                        val image = imageReader?.acquireLatestImage()
+                        if (image != null) {
+                            val planes = image.planes
+                            val buffer = planes[0].buffer
+                            val pixelStride = planes[0].pixelStride
+                            val rowStride = planes[0].rowStride
+                            val width = image.width
+                            val height = image.height
+                            val rowPadding = rowStride - pixelStride * width
 
-                                val baos = ByteArrayOutputStream()
-                                bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
-                                val jpegData = baos.toByteArray()
-                                lastJpegData = jpegData
+                            val bitmap = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
+                            bitmap.copyPixelsFromBuffer(buffer)
+                            image.close()
 
-                                image.close()
-                                bitmap.recycle()
-                            }
-
-                            // Siempre enviamos el último frame disponible (nuevo o repetido)
-                            lastJpegData?.let { data ->
-                                out.write("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${data.size}\r\n\r\n".toByteArray())
-                                out.write(data)
-                                out.write("\r\n".toByteArray())
-                                out.flush()
-                            }
-
-                            // Ajustar frecuencia según estado de la pantalla
-                            val delay = if (isScreenOn.get()) 150L else 1000L
-                            Thread.sleep(delay)
+                            val baos = ByteArrayOutputStream()
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
+                            lastJpegData = baos.toByteArray()
+                            bitmap.recycle()
                         }
-                    } catch (e: IOException) {
-                        // Cliente cerró la conexión - salir del bucle normalmente
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+
+                        lastJpegData?.let { data ->
+                            outputStream.write(("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${data.size}\r\n\r\n").toByteArray())
+                            outputStream.write(data)
+                            outputStream.write("\r\n".toByteArray())
+                            outputStream.flush()
+                        }
+
+                        Thread.sleep(if (isScreenOn.get()) 150L else 1000L)
                     }
+                } catch (e: Exception) {
+                    try { outputStream.close() } catch (ex: Exception) {}
                 }
             }
+            // Corregido: Uso de newChunkedResponse para evitar error de parámetros
+            return newChunkedResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=--frame", inputStream)
         }
     }
 
     private fun createNotificationChannel() {
-        // Usamos nombres completamente calificados para evitar ambigüedades
-        val channel = android.app.NotificationChannel(
-            "SCREEN_CAST_CH",
-            "Transmisión de pantalla",
-            android.app.NotificationManager.IMPORTANCE_LOW
-        )
-        val notificationManager = getSystemService(android.app.NotificationManager::class.java)
-        notificationManager.createNotificationChannel(channel)
+        val channel = NotificationChannel("SCREEN_CAST_CH", "Transmisión", NotificationManager.IMPORTANCE_LOW)
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
     }
 
     private fun stopStreaming() {
         if (isStopping) return
         isStopping = true
-
-        // Liberar locks
         if (wakeLock?.isHeld == true) wakeLock?.release()
         if (wifiLock?.isHeld == true) wifiLock?.release()
-
-        // Detener servidor
         server?.stop()
-        server = null
-
-        // Liberar recursos de captura
         virtualDisplay?.release()
-        virtualDisplay = null
         imageReader?.close()
-        imageReader = null
-
-        // Detener proyección
-        mediaProjection?.unregisterCallback(projectionCallback)
         mediaProjection?.stop()
-        mediaProjection = null
-
         stopSelf()
     }
 
     override fun onDestroy() {
-        unregisterReceiver(screenStateReceiver)
+        try { unregisterReceiver(screenStateReceiver) } catch (e: Exception) {}
         stopStreaming()
         super.onDestroy()
     }
