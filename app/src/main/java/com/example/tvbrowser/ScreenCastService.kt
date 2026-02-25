@@ -42,9 +42,7 @@ class ScreenCastService : Service() {
     private var isStopping = false
 
     private val projectionCallback = object : MediaProjection.Callback() {
-        override fun onStop() {
-            stopStreaming()
-        }
+        override fun onStop() { stopStreaming() }
     }
 
     private val screenStateReceiver = object : BroadcastReceiver() {
@@ -70,26 +68,27 @@ class ScreenCastService : Service() {
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        // WakeLock sin tiempo límite para que no muera en el bolsillo
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenShare::WakeLock")
-        wakeLock?.acquire(10*60*1000L)
+        if (wakeLock?.isHeld == false) wakeLock?.acquire()
 
         val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ScreenShare::WifiLock")
-        wifiLock?.acquire()
+        if (wifiLock?.isHeld == false) wifiLock?.acquire()
 
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "SCREEN_CAST_CH")
-            .setContentTitle("Transmisión Activa")
-            .setContentText("El servidor sigue funcionando con pantalla apagada")
+            .setContentTitle("Transmisión Persistente")
+            .setContentText("Activa incluso con pantalla bloqueada")
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
         startForeground(1, notification)
 
-        if (data != null) {
+        if (data != null && mediaProjection == null) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, data)
-            // Registro obligatorio para evitar Crash en Android 14+
             mediaProjection?.registerCallback(projectionCallback, handler)
             setupProjection()
             startServer()
@@ -103,11 +102,11 @@ class ScreenCastService : Service() {
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getMetrics(metrics)
 
+        // Resolución fija para estabilidad térmica en el bolsillo
         val targetWidth = 480
         val targetHeight = 854
 
         imageReader = ImageReader.newInstance(targetWidth, targetHeight, PixelFormat.RGBA_8888, 2)
-
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenCapture", targetWidth, targetHeight, metrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
@@ -116,11 +115,9 @@ class ScreenCastService : Service() {
     }
 
     private fun startServer() {
-        server = ScreenServer(8080)
-        try {
-            server?.start()
-        } catch (e: IOException) {
-            e.printStackTrace()
+        if (server == null) {
+            server = ScreenServer(8080)
+            try { server?.start() } catch (e: IOException) { e.printStackTrace() }
         }
     }
 
@@ -149,7 +146,7 @@ class ScreenCastService : Service() {
                             val baos = ByteArrayOutputStream()
                             bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
                             lastJpegData = baos.toByteArray()
-                            bitmap.recycle()
+                            bitmap.recycle() // Liberar memoria inmediatamente
                         }
 
                         lastJpegData?.let { data ->
@@ -159,13 +156,13 @@ class ScreenCastService : Service() {
                             outputStream.flush()
                         }
 
-                        Thread.sleep(if (isScreenOn.get()) 150L else 1000L)
+                        // Mantiene el hilo vivo siempre
+                        Thread.sleep(if (isScreenOn.get()) 150L else 500L)
                     }
                 } catch (e: Exception) {
                     try { outputStream.close() } catch (ex: Exception) {}
                 }
             }
-            // Corregido: Uso de newChunkedResponse para evitar error de parámetros
             return newChunkedResponse(Response.Status.OK, "multipart/x-mixed-replace; boundary=--frame", inputStream)
         }
     }
