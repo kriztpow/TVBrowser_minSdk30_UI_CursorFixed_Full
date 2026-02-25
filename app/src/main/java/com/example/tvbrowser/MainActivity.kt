@@ -12,8 +12,9 @@ import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.constraintlayout.widget.ConstraintLayout
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.util.Locale
-import kotlin.system.exitProcess
 
 class MainActivity : AppCompatActivity() {
 
@@ -24,15 +25,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private val SCREEN_CAPTURE_REQUEST_CODE = 1000
     private var isDimmed = false
+    private var isServiceRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // IMPORTANTE para Xiaomi: Mantiene el proceso vivo
+        // Evitar que la pantalla se apague mientras estamos en la actividad (solo cuando no transmitimos)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // Vincular vistas
         mainLayout = findViewById(R.id.mainLayout)
         shareButton = findViewById(R.id.shareButton)
         panicButton = findViewById(R.id.panicButton)
@@ -40,22 +41,22 @@ class MainActivity : AppCompatActivity() {
 
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
-        val ip = getLocalIpAddress()
-        ipText.text = if (ip != null) "http://$ip:8080" else "Sin Wi-Fi"
+        updateIpDisplay()
 
         shareButton.setOnClickListener {
-            if (ip != null) {
-                startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), SCREEN_CAPTURE_REQUEST_CODE)
+            if (!isServiceRunning) {
+                startActivityForResult(
+                    mediaProjectionManager.createScreenCaptureIntent(),
+                    SCREEN_CAPTURE_REQUEST_CODE
+                )
             }
         }
 
         panicButton.setOnClickListener {
             stopService(Intent(this, ScreenCastService::class.java))
             finishAndRemoveTask()
-            exitProcess(0)
         }
 
-        // Si la pantalla está negra, un toque restaura el brillo
         mainLayout.setOnClickListener {
             if (isDimmed) toggleDimMode(false)
         }
@@ -65,29 +66,50 @@ class MainActivity : AppCompatActivity() {
         isDimmed = activate
         val params = window.attributes
         if (activate) {
-            params.screenBrightness = 0.01f // Brillo al mínimo
+            params.screenBrightness = 0.01f
             mainLayout.setBackgroundColor(Color.BLACK)
             ipText.text = "TRANSMITIENDO... (Toca para restaurar)"
             shareButton.visibility = android.view.View.INVISIBLE
+            // Permitir que la pantalla se apague automáticamente (el servicio mantiene la CPU con wake lock)
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            isServiceRunning = true
         } else {
-            params.screenBrightness = -1f // Brillo normal
+            params.screenBrightness = -1f
             mainLayout.setBackgroundColor(Color.parseColor("#1A1A1A"))
             ipText.text = "http://${getLocalIpAddress()}:8080"
             shareButton.visibility = android.view.View.VISIBLE
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            isServiceRunning = false
         }
         window.attributes = params
     }
 
+    private fun updateIpDisplay() {
+        val ip = getLocalIpAddress()
+        ipText.text = if (ip != null) "http://$ip:8080" else "Sin conexión de red"
+    }
+
     private fun getLocalIpAddress(): String? {
-        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val ipAddress = wifiManager.connectionInfo.ipAddress
-        return if (ipAddress == 0) null else String.format(Locale.getDefault(), "%d.%d.%d.%d",
-            (ipAddress and 0xff), (ipAddress shr 8 and 0xff),
-            (ipAddress shr 16 and 0xff), (ipAddress shr 24 and 0xff))
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val intf = interfaces.nextElement()
+                val addresses = intf.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val addr = addresses.nextElement()
+                    if (!addr.isLoopbackAddress && addr is Inet4Address) {
+                        return addr.hostAddress
+                    }
+                }
+            }
+        } catch (ex: Exception) {
+            ex.printStackTrace()
+        }
+        return null
     }
 
     override fun onBackPressed() {
-        moveTaskToBack(true) // En lugar de cerrar, minimiza
+        moveTaskToBack(true)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -98,7 +120,13 @@ class MainActivity : AppCompatActivity() {
                 putExtra("DATA", data)
             }
             startForegroundService(serviceIntent)
-            toggleDimMode(true) // Activa el modo ahorro automáticamente
+            toggleDimMode(true)
         }
+    }
+
+    // Cuando la actividad vuelve a primer plano, actualizamos la IP por si cambió
+    override fun onResume() {
+        super.onResume()
+        updateIpDisplay()
     }
 }
