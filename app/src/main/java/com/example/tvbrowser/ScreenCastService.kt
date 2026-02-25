@@ -32,7 +32,6 @@ class ScreenCastService : Service() {
     private var imageReader: ImageReader? = null
     private var server: ScreenServer? = null
     private val handler = Handler(Looper.getMainLooper())
-
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
@@ -67,8 +66,8 @@ class ScreenCastService : Service() {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
+        // 1. WAKELOCK TOTAL: Evita que el CPU entre en modo sueño al bloquear
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        // WakeLock sin tiempo límite para que no muera en el bolsillo
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenShare::WakeLock")
         if (wakeLock?.isHeld == false) wakeLock?.acquire()
 
@@ -78,12 +77,13 @@ class ScreenCastService : Service() {
 
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "SCREEN_CAST_CH")
-            .setContentTitle("Transmisión Persistente")
-            .setContentText("Activa incluso con pantalla bloqueada")
+            .setContentTitle("Transmisión Activa")
+            .setContentText("Sigue transmitiendo en el bolsillo...")
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
+        
         startForeground(1, notification)
 
         if (data != null && mediaProjection == null) {
@@ -102,14 +102,14 @@ class ScreenCastService : Service() {
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getMetrics(metrics)
 
-        // Resolución fija para estabilidad térmica en el bolsillo
-        val targetWidth = 480
-        val targetHeight = 854
+        imageReader = ImageReader.newInstance(480, 854, PixelFormat.RGBA_8888, 2)
 
-        imageReader = ImageReader.newInstance(targetWidth, targetHeight, PixelFormat.RGBA_8888, 2)
+        // 2. BANDERAS DE PERSISTENCIA: Obliga al sistema a no matar la captura al apagar pantalla
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ScreenCapture", targetWidth, targetHeight, metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            "ScreenCapture", 480, 854, metrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or 
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or 
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION,
             imageReader?.surface, null, null
         )
     }
@@ -146,18 +146,17 @@ class ScreenCastService : Service() {
                             val baos = ByteArrayOutputStream()
                             bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
                             lastJpegData = baos.toByteArray()
-                            bitmap.recycle() // Liberar memoria inmediatamente
+                            bitmap.recycle()
                         }
 
+                        // 3. ENVÍO CONTINUO: Siempre manda el último frame para que el cliente no se desconecte
                         lastJpegData?.let { data ->
                             outputStream.write(("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${data.size}\r\n\r\n").toByteArray())
                             outputStream.write(data)
                             outputStream.write("\r\n".toByteArray())
                             outputStream.flush()
                         }
-
-                        // Mantiene el hilo vivo siempre
-                        Thread.sleep(if (isScreenOn.get()) 150L else 500L)
+                        Thread.sleep(if (isScreenOn.get()) 150L else 300L)
                     }
                 } catch (e: Exception) {
                     try { outputStream.close() } catch (ex: Exception) {}
