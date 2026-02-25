@@ -21,9 +21,6 @@ import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.OutputStream
-import java.net.Inet4Address
-import java.net.NetworkInterface
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 class ScreenCastService : Service() {
@@ -130,7 +127,7 @@ class ScreenCastService : Service() {
             targetHeight,
             metrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
+            imageReader!!.surface,  // Usamos !! porque imageReader ya fue inicializado
             null,
             null
         )
@@ -205,12 +202,14 @@ class ScreenCastService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
+        // Usamos nombres completamente calificados para evitar ambigüedades
+        val channel = android.app.NotificationChannel(
             "SCREEN_CAST_CH",
             "Transmisión de pantalla",
-            NotificationManager.IMPORTANCE_LOW
+            android.app.NotificationManager.IMPORTANCE_LOW
         )
-        (getSystemService(NotificationManager::class.java)).createNotificationChannel(channel)
+        val notificationManager = getSystemService(android.app.NotificationManager::class.java)
+        notificationManager.createNotificationChannel(channel)
     }
 
     private fun stopStreaming() {
