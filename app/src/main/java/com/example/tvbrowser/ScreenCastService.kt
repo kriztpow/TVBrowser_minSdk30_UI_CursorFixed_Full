@@ -66,7 +66,6 @@ class ScreenCastService : Service() {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
-        // 1. WAKELOCK TOTAL: Evita que el CPU entre en modo sueño al bloquear
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenShare::WakeLock")
         if (wakeLock?.isHeld == false) wakeLock?.acquire()
@@ -77,11 +76,11 @@ class ScreenCastService : Service() {
 
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "SCREEN_CAST_CH")
-            .setContentTitle("Transmisión Activa")
-            .setContentText("Sigue transmitiendo en el bolsillo...")
+            .setContentTitle("Servidor de Pantalla Activo")
+            .setContentText("Transmitiendo en segundo plano...")
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setOngoing(true)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setPriority(NotificationCompat.PRIORITY_MAX) // Máxima prioridad
             .build()
         
         startForeground(1, notification)
@@ -104,12 +103,9 @@ class ScreenCastService : Service() {
 
         imageReader = ImageReader.newInstance(480, 854, PixelFormat.RGBA_8888, 2)
 
-        // 2. BANDERAS DE PERSISTENCIA: Obliga al sistema a no matar la captura al apagar pantalla
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenCapture", 480, 854, metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or 
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or 
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface, null, null
         )
     }
@@ -129,34 +125,44 @@ class ScreenCastService : Service() {
             thread {
                 try {
                     while (!isStopping) {
-                        val image = imageReader?.acquireLatestImage()
-                        if (image != null) {
-                            val planes = image.planes
-                            val buffer = planes[0].buffer
-                            val pixelStride = planes[0].pixelStride
-                            val rowStride = planes[0].rowStride
-                            val width = image.width
-                            val height = image.height
-                            val rowPadding = rowStride - pixelStride * width
+                        // SI LA PANTALLA ESTÁ ENCENDIDA, CAPTURAMOS NUEVOS FRAMES
+                        if (isScreenOn.get()) {
+                            val image = imageReader?.acquireLatestImage()
+                            if (image != null) {
+                                val planes = image.planes
+                                val buffer = planes[0].buffer
+                                val pixelStride = planes[0].pixelStride
+                                val rowStride = planes[0].rowStride
+                                val width = image.width
+                                val height = image.height
+                                val rowPadding = rowStride - pixelStride * width
 
-                            val bitmap = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
-                            bitmap.copyPixelsFromBuffer(buffer)
-                            image.close()
+                                val bitmap = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
+                                bitmap.copyPixelsFromBuffer(buffer)
+                                image.close()
 
-                            val baos = ByteArrayOutputStream()
-                            bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
-                            lastJpegData = baos.toByteArray()
-                            bitmap.recycle()
+                                val baos = ByteArrayOutputStream()
+                                bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
+                                lastJpegData = baos.toByteArray()
+                                bitmap.recycle()
+                            }
                         }
 
-                        // 3. ENVÍO CONTINUO: Siempre manda el último frame para que el cliente no se desconecte
+                        // SIEMPRE ENVIAMOS EL ÚLTIMO FRAME (Esté la pantalla on u off)
+                        // Esto engaña al sistema y mantiene la conexión viva en el bolsillo
                         lastJpegData?.let { data ->
-                            outputStream.write(("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${data.size}\r\n\r\n").toByteArray())
-                            outputStream.write(data)
-                            outputStream.write("\r\n".toByteArray())
-                            outputStream.flush()
+                            try {
+                                outputStream.write(("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${data.size}\r\n\r\n").toByteArray())
+                                outputStream.write(data)
+                                outputStream.write("\r\n".toByteArray())
+                                outputStream.flush()
+                            } catch (e: Exception) {
+                                // El cliente se desconectó
+                                return@thread
+                            }
                         }
-                        Thread.sleep(if (isScreenOn.get()) 150L else 300L)
+                        
+                        Thread.sleep(if (isScreenOn.get()) 100L else 500L)
                     }
                 } catch (e: Exception) {
                     try { outputStream.close() } catch (ex: Exception) {}
@@ -167,7 +173,7 @@ class ScreenCastService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel("SCREEN_CAST_CH", "Transmisión", NotificationManager.IMPORTANCE_LOW)
+        val channel = NotificationChannel("SCREEN_CAST_CH", "Transmisión", NotificationManager.IMPORTANCE_HIGH)
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
     }
