@@ -30,6 +30,7 @@ class ScreenCastService : Service() {
     private var imageReader: ImageReader? = null
     private val handler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     @Volatile
     private var lastJpegData: ByteArray? = null
@@ -37,7 +38,8 @@ class ScreenCastService : Service() {
     private var isStopping = false
 
     // CONFIGURACIÓN DE CONEXIÓN INVERSA
-    private val CLIENT_IP = "192.168.100.2" // <-- AQUÍ LA IP DEL DISPOSITIVO RECEPTOR
+    // Pon aquí la IP del dispositivo que tiene la app CLIENTE abierta
+    private val CLIENT_IP = "192.168.1.XX" 
     private val CLIENT_PORT = 9000
 
     private val screenStateReceiver = object : BroadcastReceiver() {
@@ -62,17 +64,28 @@ class ScreenCastService : Service() {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
+        // 1. Iniciar Foreground inmediatamente para evitar que Android mate el servicio
+        startForeground(1, createNotification())
+
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ReverseCast::Lock")
-        wakeLock?.acquire()
+        if (wakeLock?.isHeld == false) wakeLock?.acquire()
 
-        startForeground(1, createNotification())
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ReverseCast::WifiLock")
+        if (wifiLock?.isHeld == false) wifiLock?.acquire()
 
         if (data != null && mediaProjection == null) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, data)
+            
+            // 2. CORRECCIÓN: Registrar callback ANTES de crear el VirtualDisplay (Fix error Android 14)
+            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() { stopStreaming() }
+            }, handler)
+
             setupProjection()
-            startReverseConnection() // Iniciamos la búsqueda del cliente
+            startReverseConnection() 
         }
         return START_STICKY
     }
@@ -80,7 +93,10 @@ class ScreenCastService : Service() {
     private fun setupProjection() {
         val metrics = DisplayMetrics()
         (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getMetrics(metrics)
+        
+        // Resolución optimizada para fluidez
         imageReader = ImageReader.newInstance(480, 854, PixelFormat.RGBA_8888, 2)
+        
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenCapture", 480, 854, metrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
@@ -99,9 +115,11 @@ class ScreenCastService : Service() {
                         val pixelStride = planes[0].pixelStride
                         val rowStride = planes[0].rowStride
                         val rowPadding = rowStride - pixelStride * width
+                        
                         val bitmap = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
                         bitmap.copyPixelsFromBuffer(buffer)
                         it.close()
+                        
                         val baos = ByteArrayOutputStream()
                         bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
                         lastJpegData = baos.toByteArray()
@@ -117,8 +135,9 @@ class ScreenCastService : Service() {
         thread {
             while (!isStopping) {
                 try {
-                    // El servidor intenta conectarse al cliente
+                    // El servidor (Xiaomi) busca activamente al cliente
                     val socket = Socket(CLIENT_IP, CLIENT_PORT)
+                    socket.tcpNoDelay = true
                     val out = DataOutputStream(socket.getOutputStream())
                     
                     while (socket.isConnected && !isStopping) {
@@ -128,11 +147,11 @@ class ScreenCastService : Service() {
                             out.write(data)
                             out.flush()
                         }
-                        // Si la pantalla se apaga, seguimos enviando pero más lento
+                        // Si la pantalla se apaga, seguimos enviando para no romper el socket
                         Thread.sleep(if (isScreenOn.get()) 100L else 1000L)
                     }
                 } catch (e: Exception) {
-                    // Si no encuentra al cliente, espera 3 segundos y reintenta solo
+                    // Si el cliente no está escuchando, reintenta en 3 segundos
                     Thread.sleep(3000)
                 }
             }
@@ -141,21 +160,28 @@ class ScreenCastService : Service() {
 
     private fun createNotification(): Notification {
         val chan = NotificationChannel("REV_CH", "Reverse Stream", NotificationManager.IMPORTANCE_LOW)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(chan)
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(chan)
         return NotificationCompat.Builder(this, "REV_CH")
             .setContentTitle("Buscando Receptor...")
-            .setContentText("Intentando conectar con $CLIENT_IP")
+            .setContentText("Intentando conectar con el cliente en $CLIENT_IP")
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setOngoing(true)
             .build()
     }
 
-    override fun onDestroy() {
+    private fun stopStreaming() {
         isStopping = true
-        unregisterReceiver(screenStateReceiver)
-        wakeLock?.release()
+        if (wakeLock?.isHeld == true) wakeLock?.release()
+        if (wifiLock?.isHeld == true) wifiLock?.release()
         virtualDisplay?.release()
+        imageReader?.close()
         mediaProjection?.stop()
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        try { unregisterReceiver(screenStateReceiver) } catch (e: Exception) {}
+        stopStreaming()
         super.onDestroy()
     }
 
