@@ -19,7 +19,6 @@ import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
-import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -31,12 +30,15 @@ class ScreenCastService : Service() {
     private var imageReader: ImageReader? = null
     private val handler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
 
     @Volatile
     private var lastJpegData: ByteArray? = null
     private val isScreenOn = AtomicBoolean(true)
     private var isStopping = false
+
+    // CONFIGURACIÓN DE CONEXIÓN INVERSA
+    private val CLIENT_IP = "192.168.1.XX" // <-- AQUÍ LA IP DEL DISPOSITIVO RECEPTOR
+    private val CLIENT_PORT = 9000
 
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -61,23 +63,16 @@ class ScreenCastService : Service() {
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenShare::WakeLock")
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ReverseCast::Lock")
         wakeLock?.acquire()
-
-        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ScreenShare::WifiLock")
-        wifiLock?.acquire()
 
         startForeground(1, createNotification())
 
         if (data != null && mediaProjection == null) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, data)
-            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() { stopStreaming() }
-            }, handler)
             setupProjection()
-            startSocketServer()
+            startReverseConnection() // Iniciamos la búsqueda del cliente
         }
         return START_STICKY
     }
@@ -96,17 +91,17 @@ class ScreenCastService : Service() {
             while (!isStopping) {
                 if (isScreenOn.get()) {
                     val image = imageReader?.acquireLatestImage()
-                    if (image != null) {
-                        val planes = image.planes
+                    image?.let {
+                        val planes = it.planes
                         val buffer = planes[0].buffer
-                        val rowStride = planes[0].rowStride
+                        val width = it.width
+                        val height = it.height
                         val pixelStride = planes[0].pixelStride
-                        val width = image.width
-                        val height = image.height
+                        val rowStride = planes[0].rowStride
                         val rowPadding = rowStride - pixelStride * width
                         val bitmap = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
                         bitmap.copyPixelsFromBuffer(buffer)
-                        image.close()
+                        it.close()
                         val baos = ByteArrayOutputStream()
                         bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
                         lastJpegData = baos.toByteArray()
@@ -118,58 +113,49 @@ class ScreenCastService : Service() {
         }
     }
 
-    private fun startSocketServer() {
+    private fun startReverseConnection() {
         thread {
-            try {
-                val serverSocket = ServerSocket(8080)
-                while (!isStopping) {
-                    val client = serverSocket.accept()
-                    handleClient(client)
-                }
-            } catch (e: Exception) { e.printStackTrace() }
-        }
-    }
-
-    private fun handleClient(socket: Socket) {
-        thread {
-            try {
-                val out = DataOutputStream(socket.getOutputStream())
-                while (socket.isConnected && !isStopping) {
-                    val data = lastJpegData
-                    if (data != null) {
-                        out.writeInt(data.size)
-                        out.write(data)
-                        out.flush()
+            while (!isStopping) {
+                try {
+                    // El servidor intenta conectarse al cliente
+                    val socket = Socket(CLIENT_IP, CLIENT_PORT)
+                    val out = DataOutputStream(socket.getOutputStream())
+                    
+                    while (socket.isConnected && !isStopping) {
+                        val data = lastJpegData
+                        if (data != null) {
+                            out.writeInt(data.size)
+                            out.write(data)
+                            out.flush()
+                        }
+                        // Si la pantalla se apaga, seguimos enviando pero más lento
+                        Thread.sleep(if (isScreenOn.get()) 100L else 1000L)
                     }
-                    Thread.sleep(if (isScreenOn.get()) 100 else 500)
+                } catch (e: Exception) {
+                    // Si no encuentra al cliente, espera 3 segundos y reintenta solo
+                    Thread.sleep(3000)
                 }
-            } catch (e: Exception) { socket.close() }
+            }
         }
     }
 
     private fun createNotification(): Notification {
-        val chan = NotificationChannel("SC_CH", "Transmisión", NotificationManager.IMPORTANCE_LOW)
+        val chan = NotificationChannel("REV_CH", "Reverse Stream", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(chan)
-        return NotificationCompat.Builder(this, "SC_CH")
-            .setContentTitle("Servidor de Pantalla")
-            .setContentText("Listo para conexión de cliente")
+        return NotificationCompat.Builder(this, "REV_CH")
+            .setContentTitle("Buscando Receptor...")
+            .setContentText("Intentando conectar con $CLIENT_IP")
             .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setOngoing(true)
             .build()
     }
 
-    private fun stopStreaming() {
-        isStopping = true
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wifiLock?.let { if (it.isHeld) it.release() }
-        virtualDisplay?.release()
-        imageReader?.close()
-        mediaProjection?.stop()
-        stopSelf()
-    }
-
     override fun onDestroy() {
+        isStopping = true
         unregisterReceiver(screenStateReceiver)
-        stopStreaming()
+        wakeLock?.release()
+        virtualDisplay?.release()
+        mediaProjection?.stop()
         super.onDestroy()
     }
 
