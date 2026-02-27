@@ -37,9 +37,7 @@ class ScreenCastService : Service() {
     private val isScreenOn = AtomicBoolean(true)
     private var isStopping = false
 
-    // CONFIGURACIÓN DE CONEXIÓN INVERSA
-    // Pon aquí la IP del dispositivo que tiene la app CLIENTE abierta
-    private val CLIENT_IP = "192.168.100.2" 
+    private val CLIENT_IP = "192.168.100.2"
     private val CLIENT_PORT = 9000
 
     private val screenStateReceiver = object : BroadcastReceiver() {
@@ -64,7 +62,6 @@ class ScreenCastService : Service() {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data = intent?.getParcelableExtra<Intent>("DATA")
 
-        // 1. Iniciar Foreground inmediatamente para evitar que Android mate el servicio
         startForeground(1, createNotification())
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -79,13 +76,12 @@ class ScreenCastService : Service() {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, data)
             
-            // 2. CORRECCIÓN: Registrar callback ANTES de crear el VirtualDisplay (Fix error Android 14)
             mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() { stopStreaming() }
             }, handler)
 
             setupProjection()
-            startReverseConnection() 
+            startReverseConnection()
         }
         return START_STICKY
     }
@@ -94,37 +90,37 @@ class ScreenCastService : Service() {
         val metrics = DisplayMetrics()
         (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getMetrics(metrics)
         
-        // Resolución optimizada para fluidez
         imageReader = ImageReader.newInstance(480, 854, PixelFormat.RGBA_8888, 2)
-        
+
+        // CAMBIO CRÍTICO: Flags para que no se detenga al apagar pantalla
+        val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or 
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or 
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenCapture", 480, 854, metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface, null, null
+            flags, imageReader?.surface, null, null
         )
-        
+
         thread {
             while (!isStopping) {
-                if (isScreenOn.get()) {
-                    val image = imageReader?.acquireLatestImage()
-                    image?.let {
-                        val planes = it.planes
-                        val buffer = planes[0].buffer
-                        val width = it.width
-                        val height = it.height
-                        val pixelStride = planes[0].pixelStride
-                        val rowStride = planes[0].rowStride
-                        val rowPadding = rowStride - pixelStride * width
-                        
-                        val bitmap = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
-                        bitmap.copyPixelsFromBuffer(buffer)
-                        it.close()
-                        
-                        val baos = ByteArrayOutputStream()
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
-                        lastJpegData = baos.toByteArray()
-                        bitmap.recycle()
-                    }
+                // Quitamos el check de isScreenOn para intentar capturar siempre
+                val image = imageReader?.acquireLatestImage()
+                image?.let {
+                    val planes = it.planes
+                    val buffer = planes[0].buffer
+                    val width = it.width
+                    val height = it.height
+                    val pixelStride = planes[0].pixelStride
+                    val rowStride = planes[0].rowStride
+                    val rowPadding = rowStride - pixelStride * width
+                    val bitmap = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
+                    bitmap.copyPixelsFromBuffer(buffer)
+                    it.close()
+                    val baos = ByteArrayOutputStream()
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
+                    lastJpegData = baos.toByteArray()
+                    bitmap.recycle()
                 }
                 Thread.sleep(150)
             }
@@ -135,23 +131,26 @@ class ScreenCastService : Service() {
         thread {
             while (!isStopping) {
                 try {
-                    // El servidor (Xiaomi) busca activamente al cliente
                     val socket = Socket(CLIENT_IP, CLIENT_PORT)
                     socket.tcpNoDelay = true
+                    socket.keepAlive = true // Mantiene el socket vivo a nivel TCP
                     val out = DataOutputStream(socket.getOutputStream())
-                    
+
                     while (socket.isConnected && !isStopping) {
                         val data = lastJpegData
                         if (data != null) {
                             out.writeInt(data.size)
                             out.write(data)
                             out.flush()
+                        } else {
+                            // Si no hay imagen, enviamos un "ping" para que el socket no se cierre
+                            out.writeInt(-1)
+                            out.flush()
                         }
-                        // Si la pantalla se apaga, seguimos enviando para no romper el socket
-                        Thread.sleep(if (isScreenOn.get()) 100L else 1000L)
+                        // Enviamos más lento si la pantalla está apagada para ahorrar recursos
+                        Thread.sleep(if (isScreenOn.get()) 100L else 500L)
                     }
                 } catch (e: Exception) {
-                    // Si el cliente no está escuchando, reintenta en 3 segundos
                     Thread.sleep(3000)
                 }
             }
@@ -162,8 +161,8 @@ class ScreenCastService : Service() {
         val chan = NotificationChannel("REV_CH", "Reverse Stream", NotificationManager.IMPORTANCE_LOW)
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(chan)
         return NotificationCompat.Builder(this, "REV_CH")
-            .setContentTitle("Buscando Receptor...")
-            .setContentText("Intentando conectar con el cliente en $CLIENT_IP")
+            .setContentTitle("Servidor de Pantalla Activo")
+            .setContentText("Transmitiendo a $CLIENT_IP")
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setOngoing(true)
             .build()
