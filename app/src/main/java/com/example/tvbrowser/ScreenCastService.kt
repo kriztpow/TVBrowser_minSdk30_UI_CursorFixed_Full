@@ -39,7 +39,7 @@ class ScreenCastService : Service() {
 
     // CONFIGURACIÓN DE CONEXIÓN INVERSA
     // Pon aquí la IP del dispositivo que tiene la app CLIENTE abierta
-    private val CLIENT_IP = "192.168.1.XX" 
+    private val CLIENT_IP = "192.168.100.2" 
     private val CLIENT_PORT = 9000
 
     private val screenStateReceiver = object : BroadcastReceiver() {
