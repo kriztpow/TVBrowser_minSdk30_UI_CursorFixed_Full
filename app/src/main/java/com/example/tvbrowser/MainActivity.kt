@@ -1,12 +1,14 @@
 package com.example.tvbrowser
 
 import android.app.Activity
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.media.projection.MediaProjectionManager
-import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.TextView
@@ -14,15 +16,14 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.constraintlayout.widget.ConstraintLayout
 import java.net.Inet4Address
 import java.net.NetworkInterface
-import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var shareButton: Button
     private lateinit var panicButton: Button
     private lateinit var ipText: TextView
     private lateinit var mainLayout: ConstraintLayout
     private lateinit var mediaProjectionManager: MediaProjectionManager
+    
     private val SCREEN_CAPTURE_REQUEST_CODE = 1000
     private var isDimmed = false
     private var isServiceRunning = false
@@ -31,16 +32,16 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Evitar que la pantalla se apague mientras estamos en la actividad (solo cuando no transmitimos)
+        // Mantenemos pantalla encendida por defecto
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         mainLayout = findViewById(R.id.mainLayout)
         shareButton = findViewById(R.id.shareButton)
         panicButton = findViewById(R.id.panicButton)
         ipText = findViewById(R.id.ipText)
-
+        
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-
+        
         updateIpDisplay()
 
         shareButton.setOnClickListener {
@@ -53,12 +54,44 @@ class MainActivity : AppCompatActivity() {
         }
 
         panicButton.setOnClickListener {
+            stopKioskMode() // Quitamos el bloqueo antes de salir
             stopService(Intent(this, ScreenCastService::class.java))
             finishAndRemoveTask()
         }
 
         mainLayout.setOnClickListener {
             if (isDimmed) toggleDimMode(false)
+        }
+    }
+
+    private fun setupKioskMode() {
+        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val adminName = ComponentName(this, MyDeviceAdminReceiver::class.java)
+
+        if (dpm.isDeviceOwnerApp(packageName)) {
+            // 1. Definir qué apps pueden bloquearse (la nuestra)
+            dpm.setLockTaskPackages(adminName, arrayOf(packageName))
+            
+            // 2. Desactivar funciones que puedan interrumpir (opcional)
+            dpm.setLockTaskFeatures(adminName, DevicePolicyManager.LOCK_TASK_FEATURE_NONE)
+            
+            // 3. Iniciar el bloqueo
+            try {
+                startLockTask()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun stopKioskMode() {
+        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        if (dpm.isLockTaskPermitted(packageName)) {
+            try {
+                stopLockTask()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
@@ -69,16 +102,21 @@ class MainActivity : AppCompatActivity() {
             params.screenBrightness = 0.01f
             mainLayout.setBackgroundColor(Color.BLACK)
             ipText.text = "TRANSMITIENDO... (Toca para restaurar)"
-            shareButton.visibility = android.view.View.INVISIBLE
-            // Permitir que la pantalla se apague automáticamente (el servicio mantiene la CPU con wake lock)
-            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            shareButton.visibility = View.INVISIBLE
+            
+            // Iniciamos el modo Kiosco al transmitir
+            setupKioskMode()
+            
             isServiceRunning = true
         } else {
             params.screenBrightness = -1f
             mainLayout.setBackgroundColor(Color.parseColor("#1A1A1A"))
-            ipText.text = "http://${getLocalIpAddress()}:8080"
-            shareButton.visibility = android.view.View.VISIBLE
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            updateIpDisplay()
+            shareButton.visibility = View.VISIBLE
+            
+            // Salimos del modo Kiosco al restaurar la UI
+            stopKioskMode()
+            
             isServiceRunning = false
         }
         window.attributes = params
@@ -86,7 +124,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateIpDisplay() {
         val ip = getLocalIpAddress()
-        ipText.text = if (ip != null) "http://$ip:8080" else "Sin conexión de red"
+        ipText.text = if (ip != null) "CLIENTE: 192.168.100.2" else "Sin conexión de red"
     }
 
     private fun getLocalIpAddress(): String? {
@@ -109,7 +147,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onBackPressed() {
-        moveTaskToBack(true)
+        if (!isServiceRunning) super.onBackPressed()
+        else moveTaskToBack(true)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -124,7 +163,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Cuando la actividad vuelve a primer plano, actualizamos la IP por si cambió
     override fun onResume() {
         super.onResume()
         updateIpDisplay()
