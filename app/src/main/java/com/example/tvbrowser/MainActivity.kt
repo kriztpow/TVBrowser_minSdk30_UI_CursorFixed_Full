@@ -16,6 +16,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.constraintlayout.widget.ConstraintLayout
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.net.ServerSocket
+import java.net.Socket
+import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
     private lateinit var shareButton: Button
@@ -23,39 +26,38 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ipText: TextView
     private lateinit var mainLayout: ConstraintLayout
     private lateinit var mediaProjectionManager: MediaProjectionManager
-    
     private val SCREEN_CAPTURE_REQUEST_CODE = 1000
     private var isDimmed = false
     private var isServiceRunning = false
+    
+    // Almacenamos el Intent de captura para poder reiniciarlo remotamente
+    private var projectionData: Intent? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-
-        // Mantenemos pantalla encendida por defecto
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         mainLayout = findViewById(R.id.mainLayout)
         shareButton = findViewById(R.id.shareButton)
         panicButton = findViewById(R.id.panicButton)
         ipText = findViewById(R.id.ipText)
-        
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        
+
         updateIpDisplay()
+
+        // 1. Iniciar el receptor de comandos remotos (Puerto 9001)
+        listenForRemoteCommands()
 
         shareButton.setOnClickListener {
             if (!isServiceRunning) {
-                startActivityForResult(
-                    mediaProjectionManager.createScreenCaptureIntent(),
-                    SCREEN_CAPTURE_REQUEST_CODE
-                )
+                val intent = mediaProjectionManager.createScreenCaptureIntent()
+                startActivityForResult(intent, SCREEN_CAPTURE_REQUEST_CODE)
             }
         }
 
         panicButton.setOnClickListener {
-            stopKioskMode() // Quitamos el bloqueo antes de salir
-            stopService(Intent(this, ScreenCastService::class.java))
+            stopStreamingProcess()
             finishAndRemoveTask()
         }
 
@@ -64,35 +66,46 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Receptor para que la Tablet controle al Xiaomi
+    private fun listenForRemoteCommands() {
+        thread {
+            try {
+                val serverSocket = ServerSocket(9001)
+                while (true) {
+                    val client = serverSocket.accept()
+                    val reader = client.getInputStream().bufferedReader()
+                    val command = reader.readLine()
+                    
+                    runOnUiThread {
+                        when (command) {
+                            "START" -> if (!isServiceRunning) shareButton.performClick()
+                            "STOP" -> stopStreamingProcess()
+                        }
+                    }
+                    client.close()
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
+
+    private fun stopStreamingProcess() {
+        stopKioskMode()
+        stopService(Intent(this, ScreenCastService::class.java))
+        toggleDimMode(false)
+        isServiceRunning = false
+    }
+
     private fun setupKioskMode() {
         val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val adminName = ComponentName(this, MyDeviceAdminReceiver::class.java)
-
         if (dpm.isDeviceOwnerApp(packageName)) {
-            // 1. Definir qué apps pueden bloquearse (la nuestra)
             dpm.setLockTaskPackages(adminName, arrayOf(packageName))
-            
-            // 2. Desactivar funciones que puedan interrumpir (opcional)
-            dpm.setLockTaskFeatures(adminName, DevicePolicyManager.LOCK_TASK_FEATURE_NONE)
-            
-            // 3. Iniciar el bloqueo
-            try {
-                startLockTask()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            try { startLockTask() } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
     private fun stopKioskMode() {
-        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        if (dpm.isLockTaskPermitted(packageName)) {
-            try {
-                stopLockTask()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
+        try { stopLockTask() } catch (e: Exception) { e.printStackTrace() }
     }
 
     private fun toggleDimMode(activate: Boolean) {
@@ -103,57 +116,22 @@ class MainActivity : AppCompatActivity() {
             mainLayout.setBackgroundColor(Color.BLACK)
             ipText.text = "TRANSMITIENDO... (Toca para restaurar)"
             shareButton.visibility = View.INVISIBLE
-            
-            // Iniciamos el modo Kiosco al transmitir
             setupKioskMode()
-            
             isServiceRunning = true
         } else {
             params.screenBrightness = -1f
             mainLayout.setBackgroundColor(Color.parseColor("#1A1A1A"))
             updateIpDisplay()
             shareButton.visibility = View.VISIBLE
-            
-            // Salimos del modo Kiosco al restaurar la UI
-            stopKioskMode()
-            
             isServiceRunning = false
         }
         window.attributes = params
     }
 
-    private fun updateIpDisplay() {
-        val ip = getLocalIpAddress()
-        ipText.text = if (ip != null) "CLIENTE: 192.168.100.2" else "Sin conexión de red"
-    }
-
-    private fun getLocalIpAddress(): String? {
-        try {
-            val interfaces = NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
-                val intf = interfaces.nextElement()
-                val addresses = intf.inetAddresses
-                while (addresses.hasMoreElements()) {
-                    val addr = addresses.nextElement()
-                    if (!addr.isLoopbackAddress && addr is Inet4Address) {
-                        return addr.hostAddress
-                    }
-                }
-            }
-        } catch (ex: Exception) {
-            ex.printStackTrace()
-        }
-        return null
-    }
-
-    override fun onBackPressed() {
-        if (!isServiceRunning) super.onBackPressed()
-        else moveTaskToBack(true)
-    }
-
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == SCREEN_CAPTURE_REQUEST_CODE && resultCode == Activity.RESULT_OK && data != null) {
+            projectionData = data // Guardamos los datos para autoreconexión
             val serviceIntent = Intent(this, ScreenCastService::class.java).apply {
                 putExtra("RESULT_CODE", resultCode)
                 putExtra("DATA", data)
@@ -163,8 +141,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        updateIpDisplay()
+    private fun updateIpDisplay() {
+        ipText.text = "CLIENTE: 192.168.100.2"
+    }
+
+    override fun onBackPressed() {
+        if (!isServiceRunning) super.onBackPressed() else moveTaskToBack(true)
     }
 }
